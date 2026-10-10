@@ -18,7 +18,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ---------- 准备阶段 ----------
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -33,32 +32,37 @@ jobs:
       - name: Install Obfuscator
         run: npm install javascript-obfuscator
 
-      - name: Download upstream source
+      - name: Download and overwrite files
         run: |
-          curl -fsSL --max-time 60 \
-            "https://raw.githubusercontent.com/cmliu/edgetunnel/main/_worker.js" \
-            -o "明文源吗"
+          curl -fsSL --max-time 60 "https://raw.githubusercontent.com/cmliu/edgetunnel/main/_worker.js" -o "明文源吗"
 
-      # ---------- 混淆阶段 ----------
-      - name: Obfuscate source file
+      - name: Obfuscate from local source file
         run: |
           cat > obfuscate.js << 'EOF'
           const JavaScriptObfuscator = require('javascript-obfuscator');
           const fs = require('fs');
           const path = require('path');
-          const crypto = require('crypto');
 
-          /* ================= 配置区 ================= */
-          const CONFIG = {
-            source: '明文源吗',
-            output: 'worker.js',   // 固定产物名
-            minSize: 1024,
-          };
+          const sourceFileName = '明文源吗';
+          const outputFileNames = ['worker.js', '_worker.js'];
+          const sourceFilePath = path.join(process.cwd(), sourceFileName);
 
-          const OBFUSCATION_OPTIONS = {
+          if (!fs.existsSync(sourceFilePath)) {
+            console.error('错误：在路径 \'' + sourceFilePath + '\' 未找到源文件。');
+            process.exit(1);
+          }
+
+          const originalCode = fs.readFileSync(sourceFilePath, 'utf8');
+
+          if (!originalCode || originalCode.trim().length === 0) {
+            console.error('错误：源文件 ' + sourceFileName + ' 为空。');
+            process.exit(1);
+          }
+
+          const obfuscationOptions = {
             compact: true,
-            target: 'browser-no-eval',
-
+            controlFlowFlattening: false,
+            deadCodeInjection: false,
             stringArray: true,
             stringArrayEncoding: ['base64'],
             stringArrayThreshold: 1.0,
@@ -67,109 +71,79 @@ jobs:
             stringArrayWrappersCount: 2,
             stringArrayWrappersChainedCalls: false,
             stringArrayWrappersParametersMaxCount: 3,
-
             renameGlobals: false,
             identifierNamesGenerator: 'mangled-shuffled',
             ignoreImports: true,
-
+            target: 'browser-no-eval',
+            numbersToExpressions: false,
+            simplify: false,
             splitStrings: true,
             splitStringsChunkLength: 3,
+            transformObjectKeys: false,
             unicodeEscapeSequence: true,
-
-            controlFlowFlattening: false,
-            deadCodeInjection: false,
             selfDefending: false,
             debugProtection: false,
             debugProtectionInterval: 0,
             disableConsoleOutput: false,
-
-            numbersToExpressions: false,
-            simplify: false,
-            transformObjectKeys: false,
-            domainLock: [],
+            domainLock: []
           };
 
-          /* ================= 工具函数 ================= */
-          const log = {
-            info: (m) => console.log(`[INFO] ${m}`),
-            ok:   (m) => console.log(`[OK]   ${m}`),
-            err:  (m) => console.error(`[ERR]  ${m}`),
-          };
+          const originalSize = Buffer.byteLength(originalCode, 'utf8');
+          console.log('原始大小: ' + (originalSize / 1024).toFixed(2) + ' KB');
 
-          const sha256 = (str) =>
-            crypto.createHash('sha256').update(str).digest('hex').slice(0, 16);
-
-          const formatSize = (bytes) => `${(bytes / 1024).toFixed(2)} KB`;
-
-          const readSource = (filePath) => {
-            if (!fs.existsSync(filePath)) throw new Error(`源文件不存在: ${filePath}`);
-            const code = fs.readFileSync(filePath, 'utf8');
-            if (!code || code.trim().length === 0) throw new Error(`源文件为空: ${filePath}`);
-            const size = Buffer.byteLength(code, 'utf8');
-            if (size < CONFIG.minSize) {
-              throw new Error(`源文件大小异常 (${size} < ${CONFIG.minSize} 字节)`);
+          for (const outputFileName of outputFileNames) {
+            try {
+              console.log('开始混淆：' + sourceFileName + ' → ' + outputFileName);
+              const obfuscatedCode = JavaScriptObfuscator.obfuscate(originalCode, obfuscationOptions).getObfuscatedCode();
+              fs.writeFileSync(path.join(process.cwd(), outputFileName), obfuscatedCode, 'utf8');
+              const obfuscatedSize = Buffer.byteLength(obfuscatedCode, 'utf8');
+              console.log('混淆后大小: ' + (obfuscatedSize / 1024).toFixed(2) + ' KB');
+              console.log('膨胀率: ' + ((obfuscatedSize / originalSize) * 100).toFixed(1) + '%');
+              console.log('完成：\'' + sourceFileName + '\' → \'' + outputFileName + '\'');
+            } catch (err) {
+              console.error('混淆失败：' + err.message);
+              console.error(err.stack);
+              process.exit(1);
             }
-            return code;
-          };
-
-          /* ================= 主流程 ================= */
-          const run = () => {
-            const cwd = process.cwd();
-            const srcPath = path.join(cwd, CONFIG.source);
-            const outPath = path.join(cwd, CONFIG.output);
-
-            log.info(`读取源文件: ${CONFIG.source}`);
-            const originalCode = readSource(srcPath);
-            const originalSize = Buffer.byteLength(originalCode, 'utf8');
-            log.info(`源文件大小: ${formatSize(originalSize)}  sha256:${sha256(originalCode)}`);
-
-            log.info('开始混淆...');
-            const obfuscatedCode = JavaScriptObfuscator
-              .obfuscate(originalCode, OBFUSCATION_OPTIONS)
-              .getObfuscatedCode();
-
-            const obfuscatedSize = Buffer.byteLength(obfuscatedCode, 'utf8');
-            fs.writeFileSync(outPath, obfuscatedCode, 'utf8');
-
-            log.ok(`输出文件: ${CONFIG.output}`);
-            log.info(`混淆后大小: ${formatSize(obfuscatedSize)}`);
-            log.info(`膨胀率: ${((obfuscatedSize / originalSize) * 100).toFixed(1)}%`);
-            log.ok('完成');
-          };
-
-          try { run(); }
-          catch (err) { log.err(err.message); if (err.stack) console.error(err.stack); process.exit(1); }
+          }
           EOF
           node obfuscate.js
 
-      # ---------- 提交阶段 ----------
+      - name: Generate SHA256 checksums
+        id: hash
+        run: |
+          # 生成 SHA256SUMS（标准格式，可被 sha256sum -c 校验）
+          sha256sum worker.js _worker.js > SHA256SUMS
+          echo "----- SHA256SUMS -----"
+          cat SHA256SUMS
+
+          # 单独提取每个文件的哈希，供 Release 说明使用
+          HASH_WORKER=$(sha256sum worker.js | awk '{print $1}')
+          HASH_UNDERSCORE=$(sha256sum _worker.js | awk '{print $1}')
+          echo "hash_worker=${HASH_WORKER}" >> "$GITHUB_OUTPUT"
+          echo "hash_underscore=${HASH_UNDERSCORE}" >> "$GITHUB_OUTPUT"
+
       - name: Commit and push changes
         id: commit
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "明文源吗" "worker.js"
-
+          git add "明文源吗" "worker.js" "_worker.js" "SHA256SUMS"
           if git diff --staged --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "No changes, skipping commit."
+            echo "No changes, skipping."
           else
-            SHORT_SHA="${GITHUB_SHA::7}"
-            git commit -m "sync & obfuscate: update from cmliu/edgetunnel@main (${SHORT_SHA})"
+            git commit -m "sync & obfuscate: update from cmliu/edgetunnel@main"
             git push origin main
             echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
           fi
 
-      # ---------- 发布阶段（固定 Tag: latest）----------
       - name: Delete existing latest release & tag
         if: steps.commit.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 删除旧 release（若存在）
           gh release delete latest --yes --cleanup-tag 2>/dev/null || true
-          echo "Old latest release cleaned."
 
       - name: Create fixed release
         if: steps.commit.outputs.changed == 'true'
@@ -183,11 +157,37 @@ jobs:
             - **上游来源**: `cmliu/edgetunnel@main`
             - **触发 commit**: ${{ github.sha }}
             - **运行编号**: #${{ github.run_number }}
-            - **产物**: `worker.js`（已混淆）
 
-            > 每次更新会覆盖本 Release，下载链接固定为：
-            > `https://github.com/${{ github.repository }}/releases/latest/download/worker.js`
-          files: worker.js
+            ### 产物
+
+            | 文件 | 用途 | 固定下载链接 |
+            |------|------|--------------|
+            | `worker.js` | Cloudflare Worker 部署 | `https://github.com/${{ github.repository }}/releases/latest/download/worker.js` |
+            | `_worker.js` | Cloudflare Pages（高级模式） | `https://github.com/${{ github.repository }}/releases/latest/download/_worker.js` |
+
+            > 两个文件各自独立混淆，内容不同（随机字符串数组、标识符等），但功能一致。
+
+            ### SHA256
+
+            | 文件 | SHA256 |
+            |------|--------|
+            | `worker.js` | `${{ steps.hash.outputs.hash_worker }}` |
+            | `_worker.js` | `${{ steps.hash.outputs.hash_underscore }}` |
+
+            ```
+            ${{ steps.hash.outputs.hash_worker }}  worker.js
+            ${{ steps.hash.outputs.hash_underscore }}  _worker.js
+            ```
+
+            也可下载 [`SHA256SUMS`](https://github.com/${{ github.repository }}/releases/latest/download/SHA256SUMS) 后本地校验：
+
+            ```bash
+            sha256sum -c SHA256SUMS
+            ```
+          files: |
+            worker.js
+            _worker.js
+            SHA256SUMS
           draft: false
           prerelease: false
           make_latest: true
